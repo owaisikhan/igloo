@@ -1,0 +1,65 @@
+@import "tailwindcss";
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-frost: var(--frost);
+  --color-ink: var(--ink);
+  --font-mono: var(--font-plex-mono), ui-monospace, monospace;
+  --font-sans: var(--font-plex-mono), ui-monospace, monospace;
+}
+
+:root {
+  --background: oklch(0.72 0.012 265);
+  --foreground: oklch(0.99 0 0);
+  --frost: oklch(0.86 0.01 265);
+  --ink: oklch(0.32 0.02 265);
+}
+
+html,
+body {
+  background: var(--background);
+  color: var(--foreground);
+  overscroll-behavior: none;
+}
+
+body {
+  font-family: var(--font-mono);
+  -webkit-font-smoothing: antialiased;
+}
+
+::selection {
+  background: oklch(0.99 0 0 / 0.9);
+  color: var(--ink);
+}
+
+/* Faint dot grid laid over the whole viewport, like the HUD reference. */
+.dot-grid {
+  background-image: radial-gradient(
+    circle at center,
+    oklch(1 0 0 / 0.35) 0.6px,
+    transparent 1.2px
+  );
+  background-size: 66px 66px;
+}
+
+.text-glow {
+  text-shadow:
+    0 0 12px oklch(1 0 0 / 0.55),
+    0 0 2px oklch(1 0 0 / 0.9);
+}
+
+.outline-word {
+  color: transparent;
+  -webkit-text-stroke: 1.5px var(--foreground);
+  filter: drop-shadow(0 0 6px oklch(1 0 0 / 0.6));
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    transition-duration: 0.01ms !important;
+  }
+}
