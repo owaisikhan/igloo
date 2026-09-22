@@ -6,8 +6,8 @@ Tailwind CSS v4 and three.js.
 ## Sections
 
 1. **Intro** — wireframe network with floating figures.
-2. **Hero** — a geodesic "vault" with glowing seams on a procedural snowfield.
-3. **Manifesto** — the vault opens while the mission statement resolves line by line.
+2. **Hero** — a dome of rounded snow blocks with a glowing interior and arched entrance. Hovering pushes nearby blocks outward and tags them with numbered crosshairs.
+3. **Manifesto** — the dome breaks apart while the mission statement resolves line by line.
 4. **Ventures** — the camera flies past three iridescent rock blocks, each tagged with a HUD card.
 5. **Labs** — a particle sculpture on a pedestal that morphs between experiments (arrow buttons / ← → keys).
 6. **Contact** — wordmark, email and social links.

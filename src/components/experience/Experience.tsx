@@ -32,6 +32,8 @@ export function Experience() {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const engineRef = useRef<KodexaEngine | null>(null);
   const anchorRefs = useRef<(HTMLDivElement | null)[]>([]);
+  const markerRefs = useRef<(HTMLDivElement | null)[]>([]);
+  const lineRefs = useRef<(SVGLineElement | null)[]>([]);
   const [progress, setProgress] = useState(0);
   const [ready, setReady] = useState(false);
   const [loaded, setLoaded] = useState(0);
@@ -51,6 +53,7 @@ export function Experience() {
         if (cancelled) return;
         const engine = new KodexaEngine({ canvas, reducedMotion });
         engine.setVentureAnchors(anchorRefs.current);
+        engine.setHoverOverlay(markerRefs.current, lineRefs.current);
         engine.start();
         engineRef.current = engine;
         setReady(true);
@@ -170,26 +173,67 @@ export function Experience() {
         {/* ---------------- Intro ---------------- */}
         <div {...layer(introVisible * (loading ? 0 : 1))}>
           <div className="absolute inset-x-0 bottom-[14vh] flex flex-col items-center gap-3 text-center">
-            <p className="text-glow text-[11px] tracking-[0.35em]">{hero.cue}</p>
+            <p className="text-glow text-[11px] uppercase tracking-[0.35em]">{hero.cue}</p>
             <span className="block h-10 w-px animate-pulse bg-foreground/80" />
           </div>
         </div>
 
         {/* ---------------- Hero ---------------- */}
         <section {...layer(heroVisible)} aria-label="Introduction">
-          <div className="absolute bottom-[12vh] left-5 max-w-[640px] md:left-12">
-            <p className="mb-5 text-[11px] tracking-[0.3em] text-foreground/85">
-              <ScrambleText text={hero.eyebrow} active={heroVisible > 0.3} />
-            </p>
-            <h1 className="text-glow text-[34px] font-medium uppercase leading-[1.05] tracking-tight md:text-[64px]">
-              {hero.title.map((line) => (
+          <div className="absolute left-5 top-[76px] text-[12px] leading-relaxed md:left-12 md:top-[104px] md:text-[14px]">
+            <p className="text-foreground/85">{hero.copyright}</p>
+            <p className="text-glow mt-4">
+              {hero.legal.map((line) => (
                 <span key={line} className="block">
-                  <ScrambleText text={line} active={heroVisible > 0.3} duration={900} />
+                  {line}
                 </span>
               ))}
+            </p>
+          </div>
+
+          <div className="absolute right-5 top-[76px] max-w-[190px] text-right md:right-12 md:top-[104px] md:max-w-[250px]">
+            <h1 className="text-[12px] tracking-[0.05em] md:text-[15px]">
+              <ScrambleText text={hero.missionLabel} active={heroVisible > 0.3} />
             </h1>
+            <p className="text-glow mt-5 text-[12px] leading-[1.35] md:text-[15px]">{hero.mission}</p>
+          </div>
+
+          <div className="absolute bottom-[88px] left-5 max-w-[140px] text-[12px] leading-tight md:bottom-[104px] md:left-12 md:text-[14px]">
+            <p className="text-glow">{hero.cue}</p>
+            <p className="mt-2 text-foreground/75">{hero.hoverHint}</p>
           </div>
         </section>
+
+        {/* Hover crosshairs on the vault blocks (positioned by the engine). */}
+        <svg aria-hidden className="absolute inset-0 h-full w-full overflow-visible">
+          {[0, 1].map((i) => (
+            <line
+              key={i}
+              ref={(el) => {
+                lineRefs.current[i] = el;
+              }}
+              className="stroke-foreground opacity-0 transition-opacity duration-200"
+              strokeWidth={1}
+            />
+          ))}
+        </svg>
+        {[0, 1, 2].map((i) => (
+          <div
+            key={i}
+            aria-hidden
+            ref={(el) => {
+              markerRefs.current[i] = el;
+            }}
+            className="absolute left-0 top-0 opacity-0 will-change-transform"
+          >
+            <span className="absolute -left-[6px] top-0 h-px w-[13px] bg-foreground" />
+            <span className="absolute -top-[6px] left-0 h-[13px] w-px bg-foreground" />
+            <span
+              data-label
+              className="text-glow absolute -left-9 -top-6 text-[12px] font-medium tabular-nums"
+            />
+          </div>
+        ))}
 
         {/* ---------------- Manifesto ---------------- */}
         <section {...layer(maniVisible)} aria-label={manifesto.label}>

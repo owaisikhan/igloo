@@ -1,5 +1,6 @@
 import * as THREE from "three";
 import { mergeVertices } from "three/examples/jsm/utils/BufferGeometryUtils.js";
+import { RoundedBoxGeometry } from "three/examples/jsm/geometries/RoundedBoxGeometry.js";
 import { createRandom, fbm2, fbm3 } from "@/lib/noise";
 
 export const FOG_COLOR = new THREE.Color("#b3b7c2");
@@ -22,16 +23,18 @@ export function buildTerrain(segments: number) {
     const z = pos.getZ(i);
     const d = Math.hypot(x, z);
     // Flat plateau for the vault, rolling drifts, then mountains far away.
-    const plateau = THREE.MathUtils.smoothstep(d, 7, 26);
-    const drifts = (fbm2(x * 0.035 + 11, z * 0.035 - 4) - 0.35) * 9 * plateau;
-    const far = THREE.MathUtils.smoothstep(d, 90, 260);
-    const mountains = Math.pow(fbm2(x * 0.008 + 3, z * 0.008 + 9, 6), 1.6) * 150 * far;
-    const grain = (fbm2(x * 0.6, z * 0.6, 3) - 0.5) * 0.25;
-    pos.setY(i, drifts + mountains + grain - 0.4 * (1 - plateau));
+    // Gentle mound for the vault, rolling drifts, then mountains behind.
+    const plateau = THREE.MathUtils.smoothstep(d, 6, 22);
+    const mound = (1 - THREE.MathUtils.smoothstep(d, 4, 30)) * 1.5;
+    const drifts = (fbm2(x * 0.04 + 11, z * 0.04 - 4) - 0.45) * 10 * plateau;
+    const far = THREE.MathUtils.smoothstep(d, 45, 160);
+    const mountains = Math.pow(fbm2(x * 0.011 + 3, z * 0.011 + 9, 6), 1.5) * 120 * far;
+    const grain = (fbm2(x * 0.7, z * 0.7, 3) - 0.5) * 0.35;
+    pos.setY(i, drifts + mountains + grain + mound - 1.5);
   }
   geo.computeVertexNormals();
   const mat = new THREE.MeshStandardMaterial({
-    color: "#a9aebb",
+    color: "#747b8c",
     roughness: 0.95,
     metalness: 0,
   });
@@ -41,102 +44,195 @@ export function buildTerrain(segments: number) {
 }
 
 /* ------------------------------------------------------------------ */
-/* The Kodexa vault — a geodesic dome of panels with glowing seams     */
+/* The Kodexa vault — a dome of rounded snow blocks with a lit interior */
 /* ------------------------------------------------------------------ */
 
 export type VaultPanel = {
   mesh: THREE.Mesh;
   origin: THREE.Vector3;
   normal: THREE.Vector3;
+  baseQuat: THREE.Quaternion;
   spin: THREE.Vector3;
   delay: number;
+  /** Current hover push (eased toward a target every frame). */
+  hover: number;
+  label: number;
 };
+
+/** Unit rounded block roughened with position-based noise so it reads as packed snow. */
+function buildBlockGeometry(seed: number) {
+  let geo: THREE.BufferGeometry = new RoundedBoxGeometry(1, 1, 1, 4, 0.14);
+  geo.deleteAttribute("normal");
+  geo.deleteAttribute("uv");
+  geo = mergeVertices(geo);
+  const pos = geo.attributes.position as THREE.BufferAttribute;
+  const v = new THREE.Vector3();
+  for (let i = 0; i < pos.count; i++) {
+    v.fromBufferAttribute(pos, i);
+    const n = fbm3(v.x * 3.1 + seed, v.y * 3.1, v.z * 3.1 - seed, 4) - 0.5;
+    v.multiplyScalar(1 + n * 0.07);
+    pos.setXYZ(i, v.x, v.y, v.z);
+  }
+  geo.computeVertexNormals();
+  return geo;
+}
+
+/** Standard material plus a fresnel rim so block edges catch a frosty highlight. */
+function snowMaterial() {
+  const mat = new THREE.MeshStandardMaterial({
+    color: "#6f7688",
+    roughness: 0.95,
+    metalness: 0,
+  });
+  mat.onBeforeCompile = (shader) => {
+    shader.fragmentShader = shader.fragmentShader.replace(
+      "#include <dithering_fragment>",
+      `#include <dithering_fragment>
+      float kxRim = pow(1.0 - clamp(dot(normalize(vViewPosition), normal), 0.0, 1.0), 2.5);
+      gl_FragColor.rgb += kxRim * vec3(0.28, 0.31, 0.37);`,
+    );
+  };
+  return mat;
+}
 
 export function buildVault(radius = 4.2) {
   const group = new THREE.Group();
   const rand = createRandom(7);
-  const source = new THREE.IcosahedronGeometry(radius, 2);
-  const p = source.attributes.position as THREE.BufferAttribute;
   const panels: VaultPanel[] = [];
-  const panelMat = new THREE.MeshStandardMaterial({
-    color: "#b8bdc9",
-    roughness: 0.8,
-    metalness: 0.05,
-    flatShading: true,
-  });
+  const geometries = [0, 1, 2].map((s) => buildBlockGeometry(s * 9.3 + 1));
+  const material = snowMaterial();
+  const edgeGeo = new THREE.EdgesGeometry(new THREE.BoxGeometry(1, 1, 1));
+  const edgePositions: number[] = [];
+  const edgeAttr = edgeGeo.attributes.position as THREE.BufferAttribute;
+  const tmpMatrix = new THREE.Matrix4();
+  const tmpV = new THREE.Vector3();
 
-  const a = new THREE.Vector3();
-  const b = new THREE.Vector3();
-  const c = new THREE.Vector3();
-  for (let i = 0; i < p.count; i += 3) {
-    a.fromBufferAttribute(p, i);
-    b.fromBufferAttribute(p, i + 1);
-    c.fromBufferAttribute(p, i + 2);
-    const centroid = a.clone().add(b).add(c).divideScalar(3);
-    if (centroid.y < -0.3) continue;
-
-    const normal = centroid.clone().normalize();
-    // Shrink each face toward its centroid to open glowing seams, then
-    // extrude it inward to give the panel thickness.
-    const shrink = 0.88;
-    const corners = [a, b, c].map((v) =>
-      v.clone().sub(centroid).multiplyScalar(shrink),
+  const addBlock = (
+    center: THREE.Vector3,
+    basis: [THREE.Vector3, THREE.Vector3, THREE.Vector3],
+    size: THREE.Vector3,
+  ) => {
+    const [tangent, up, normal] = basis;
+    const mesh = new THREE.Mesh(geometries[panels.length % geometries.length], material);
+    const rot = new THREE.Matrix4().makeBasis(tangent, up, normal);
+    const quat = new THREE.Quaternion().setFromRotationMatrix(rot);
+    // A little hand-laid irregularity.
+    quat.multiply(
+      new THREE.Quaternion().setFromEuler(
+        new THREE.Euler((rand() - 0.5) * 0.12, (rand() - 0.5) * 0.12, (rand() - 0.5) * 0.1),
+      ),
     );
-    const depth = 0.32;
-    const inner = corners.map((v) => v.clone().addScaledVector(normal, -depth));
-    const verts = [...corners, ...inner];
-    const idx = [
-      0, 1, 2, 3, 5, 4, 0, 3, 4, 0, 4, 1, 1, 4, 5, 1, 5, 2, 2, 5, 3, 2, 3, 0,
-    ];
-    const g = new THREE.BufferGeometry();
-    const arr = new Float32Array(idx.length * 3);
-    idx.forEach((vi, k) => {
-      arr[k * 3] = verts[vi].x;
-      arr[k * 3 + 1] = verts[vi].y;
-      arr[k * 3 + 2] = verts[vi].z;
-    });
-    g.setAttribute("position", new THREE.BufferAttribute(arr, 3));
-    g.computeVertexNormals();
-    const mesh = new THREE.Mesh(g, panelMat);
-    mesh.position.copy(centroid);
+    mesh.quaternion.copy(quat);
+    mesh.position.copy(center);
+    mesh.scale.copy(size);
     mesh.castShadow = true;
+    mesh.receiveShadow = true;
     group.add(mesh);
+
+    tmpMatrix.compose(center, quat, size);
+    for (let i = 0; i < edgeAttr.count; i++) {
+      tmpV.fromBufferAttribute(edgeAttr, i).applyMatrix4(tmpMatrix);
+      edgePositions.push(tmpV.x, tmpV.y, tmpV.z);
+    }
+
     panels.push({
       mesh,
-      origin: centroid,
-      normal,
+      origin: center.clone(),
+      normal: normal.clone(),
+      baseQuat: quat.clone(),
       spin: new THREE.Vector3(rand() - 0.5, rand() - 0.5, rand() - 0.5).multiplyScalar(4),
       delay: (1 - normal.y) * 0.35 + rand() * 0.25,
+      hover: 0,
+      label: 20 + Math.floor(rand() * 60),
     });
+  };
+
+  // Entrance faces this direction; the dome leaves a gap for it.
+  const doorAngle = 0.15;
+  const thickness = 0.8;
+  const rows = 7;
+  const maxPhi = THREE.MathUtils.degToRad(74);
+  const rowHeight = (radius * maxPhi) / rows;
+
+  for (let r = 0; r < rows; r++) {
+    const phi = (r + 0.5) * (maxPhi / rows);
+    const ringRadius = (radius - thickness / 2) * Math.cos(phi);
+    const y = (radius - thickness / 2) * Math.sin(phi);
+    const count = Math.max(5, Math.round((Math.PI * 2 * ringRadius) / 1.55));
+    const width = ((Math.PI * 2 * ringRadius) / count) * 0.93;
+    const stagger = r % 2 ? Math.PI / count : 0;
+    for (let k = 0; k < count; k++) {
+      const theta = (k / count) * Math.PI * 2 + stagger;
+      const off = Math.atan2(Math.sin(theta - doorAngle), Math.cos(theta - doorAngle));
+      if (r < 3 && Math.abs(off) < 0.36) continue;
+      const normal = new THREE.Vector3(
+        Math.cos(phi) * Math.cos(theta),
+        Math.sin(phi),
+        Math.cos(phi) * Math.sin(theta),
+      );
+      const tangent = new THREE.Vector3(-Math.sin(theta), 0, Math.cos(theta));
+      const up = new THREE.Vector3().crossVectors(normal, tangent).normalize();
+      const center = new THREE.Vector3(ringRadius * Math.cos(theta), y, ringRadius * Math.sin(theta));
+      addBlock(center, [tangent, up, normal], new THREE.Vector3(width, rowHeight * 0.92, thickness));
+    }
   }
 
-  // Bright core seen through the seams — picked up by the bloom pass.
+  // Cap block on top.
+  const top = radius - thickness / 2;
+  addBlock(
+    new THREE.Vector3(0, top * Math.sin(maxPhi + 0.08) + 0.15, 0),
+    [new THREE.Vector3(1, 0, 0), new THREE.Vector3(0, 0, -1), new THREE.Vector3(0, 1, 0)],
+    new THREE.Vector3(2.1, 2.1, thickness),
+  );
+
+  // Arched entrance tunnel of blocks.
+  const axis = new THREE.Vector3(Math.cos(doorAngle), 0, Math.sin(doorAngle));
+  const side = new THREE.Vector3(-axis.z, 0, axis.x);
+  const archRadius = 1.35;
+  const archBlocks = 5;
+  for (let layer = 0; layer < 2; layer++) {
+    const along = radius - 0.3 + layer * 1.05;
+    for (let j = 0; j < archBlocks; j++) {
+      const a = ((j + 0.5) / archBlocks) * Math.PI;
+      const normal = side.clone().multiplyScalar(Math.cos(a)).add(new THREE.Vector3(0, Math.sin(a), 0));
+      // Right-handed basis (tangent × axis = normal) so the rotation is valid.
+      const tangent = side
+        .clone()
+        .multiplyScalar(Math.sin(a))
+        .add(new THREE.Vector3(0, -Math.cos(a), 0));
+      const center = axis
+        .clone()
+        .multiplyScalar(along)
+        .addScaledVector(normal, archRadius)
+        .add(new THREE.Vector3(0, 0.1, 0));
+      const arcLen = ((Math.PI * archRadius) / archBlocks) * 0.93;
+      addBlock(center, [tangent, axis.clone(), normal], new THREE.Vector3(arcLen, 0.98, 0.62));
+    }
+  }
+
+  // Bright interior glimpsed through the joints — picked up by the bloom pass.
+  const coreMat = new THREE.MeshBasicMaterial({
+    color: new THREE.Color(1, 1, 1).multiplyScalar(2.2),
+    side: THREE.DoubleSide,
+  });
   const core = new THREE.Mesh(
-    new THREE.SphereGeometry(radius - 0.4, 48, 24, 0, Math.PI * 2, 0, Math.PI * 0.62),
-    new THREE.MeshBasicMaterial({
-      color: new THREE.Color(1, 1, 1).multiplyScalar(4),
-      side: THREE.DoubleSide,
-    }),
+    new THREE.SphereGeometry(radius - thickness - 0.02, 48, 24, 0, Math.PI * 2, 0, Math.PI / 2),
+    coreMat,
   );
   group.add(core);
-
-  const baseRing = new THREE.Mesh(
-    new THREE.TorusGeometry(radius + 0.15, 0.06, 8, 128),
-    glowMaterial(),
-  );
+  const baseRing = new THREE.Mesh(new THREE.TorusGeometry(radius + 0.1, 0.03, 6, 128), glowMaterial(1.4));
   baseRing.rotation.x = Math.PI / 2;
-  baseRing.position.y = -0.2;
+  baseRing.position.y = -0.1;
+  baseRing.visible = false;
   group.add(baseRing);
 
   // Wireframe twin used by the intro.
+  const edgesGeo = new THREE.BufferGeometry();
+  edgesGeo.setAttribute("position", new THREE.Float32BufferAttribute(edgePositions, 3));
   const edges = new THREE.LineSegments(
-    new THREE.EdgesGeometry(new THREE.IcosahedronGeometry(radius * 1.01, 2), 1),
+    edgesGeo,
     new THREE.LineBasicMaterial({ color: "#ffffff", transparent: true, fog: false }),
   );
-  const clip = edges.geometry.attributes.position as THREE.BufferAttribute;
-  for (let i = 0; i < clip.count; i++) {
-    if (clip.getY(i) < -0.3) clip.setY(i, -0.3);
-  }
 
   return { group, panels, core, baseRing, edges };
 }

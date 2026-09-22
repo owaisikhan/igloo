@@ -113,6 +113,13 @@ export class KodexaEngine {
   private shapes!: Record<ShapeName, Float32Array>;
   private shapeOrder: ShapeName[] = ["orb", "knot", "glyph"];
 
+  // Hover interaction on the vault blocks
+  private pointer = new THREE.Vector2(10, 10);
+  private raycaster = new THREE.Raycaster();
+  private hoverMarkers: (HTMLElement | null)[] = [];
+  private hoverLines: (SVGLineElement | null)[] = [];
+  private blockMeshes: THREE.Object3D[] = [];
+
   private lookAt = new THREE.Vector3();
   private tmp = new THREE.Vector3();
 
@@ -149,15 +156,17 @@ export class KodexaEngine {
 
     this.resize();
     window.addEventListener("resize", this.resize);
+    window.addEventListener("pointermove", this.onPointerMove);
+    document.addEventListener("pointerleave", this.onPointerLeave);
     this.update(0, 0);
   }
 
   /* ---------------------------------------------------------------- */
 
   private buildLights() {
-    this.scene.add(new THREE.HemisphereLight("#ffffff", "#6d7384", 0.9));
-    const sun = new THREE.DirectionalLight("#ffffff", 1.3);
-    sun.position.set(18, 30, 12);
+    this.scene.add(new THREE.HemisphereLight("#eef1f8", "#4f5566", 0.55));
+    const sun = new THREE.DirectionalLight("#ffffff", 2.1);
+    sun.position.set(-14, 22, 10);
     sun.castShadow = true;
     sun.shadow.mapSize.set(1024, 1024);
     const s = sun.shadow.camera;
@@ -173,6 +182,7 @@ export class KodexaEngine {
     const vault = buildVault();
     vault.group.position.y = 0.2;
     this.panels = vault.panels;
+    this.blockMeshes = vault.panels.map((pn) => pn.mesh);
     this.vaultCore = vault.core;
     this.vaultEdges = vault.edges;
     vault.edges.position.y = 0.2;
@@ -223,6 +233,19 @@ export class KodexaEngine {
     this.lab = index;
   }
 
+  setHoverOverlay(markers: (HTMLElement | null)[], lines: (SVGLineElement | null)[]) {
+    this.hoverMarkers = markers;
+    this.hoverLines = lines;
+  }
+
+  private onPointerMove = (e: PointerEvent) => {
+    this.pointer.set((e.clientX / window.innerWidth) * 2 - 1, -(e.clientY / window.innerHeight) * 2 + 1);
+  };
+
+  private onPointerLeave = () => {
+    this.pointer.set(10, 10);
+  };
+
   setVentureAnchors(els: (HTMLElement | null)[]) {
     this.anchors = els;
   }
@@ -244,6 +267,8 @@ export class KodexaEngine {
     cancelAnimationFrame(this.raf);
     this.timer.dispose();
     window.removeEventListener("resize", this.resize);
+    window.removeEventListener("pointermove", this.onPointerMove);
+    document.removeEventListener("pointerleave", this.onPointerLeave);
     this.scene.traverse((obj) => {
       const mesh = obj as THREE.Mesh;
       mesh.geometry?.dispose();
@@ -285,20 +310,21 @@ export class KodexaEngine {
     this.venturesGroup.visible = showVentures;
     this.labsGroup.visible = showLabs;
 
-    if (p < VENTURES.start) this.updateWorld(p, time);
+    if (p >= VENTURES.start) this.hideHoverOverlay();
+    if (p < VENTURES.start) this.updateWorld(p, time, dt);
     else if (p < LABS.start) this.updateVentures(p, time);
     else this.updateLabs(p, time, dt);
 
     this.camera.lookAt(this.lookAt);
   }
 
-  private updateWorld(p: number, time: number) {
+  private updateWorld(p: number, time: number, dt: number) {
     const intro = smoothstep(0, HERO.start, p);
     const hero = range(p, HERO.start, HERO.end);
     const mani = range(p, MANIFESTO.start, MANIFESTO.end);
 
     // Intro: dense fog hides everything except the wireframe overlay.
-    const introFog = THREE.MathUtils.lerp(0.09, 0.009, intro);
+    const introFog = THREE.MathUtils.lerp(0.09, 0.0045, intro);
     const whiteout = smoothstep(0.85, 1, mani) * 0.12;
     this.fog.density = introFog + whiteout;
 
@@ -310,26 +336,91 @@ export class KodexaEngine {
     this.vaultEdges.visible = wireAlpha > 0.01;
 
     // Camera: top-down → orbiting hero shot → push into the vault.
-    const orbit = 0.75 - hero * 0.5 + Math.sin(time * 0.1) * 0.03;
-    const dist = THREE.MathUtils.lerp(19, 17, hero) - smoothstep(0, 1, mani) * 10;
-    const height = THREE.MathUtils.lerp(7, 5.5, hero) - mani * 2.5;
+    const orbit = 0.62 - hero * 0.45 + Math.sin(time * 0.1) * 0.03;
+    const dist = THREE.MathUtils.lerp(20, 18, hero) - smoothstep(0, 1, mani) * 11;
+    const height = THREE.MathUtils.lerp(6.5, 5.2, hero) - mani * 2.2;
     const introPos = this.tmp.set(0, 42, 24);
     const heroPos = new THREE.Vector3(Math.sin(orbit) * dist, height, Math.cos(orbit) * dist);
     this.camera.position.copy(introPos.lerp(heroPos, intro));
-    this.lookAt.set(0, THREE.MathUtils.lerp(0, 2.2, intro) + mani * 1.5, 0);
+    this.lookAt.set(0, THREE.MathUtils.lerp(0, 2.4, intro) + mani * 1.2, 0);
 
-    // Manifesto: the vault opens, panels drift apart.
+    // Hover: blocks near the pointer slide outward along their normals.
+    const interactive = intro > 0.9 && mani < 0.05;
+    let hit: VaultPanel | null = null;
+    if (interactive && Math.abs(this.pointer.x) <= 1) {
+      this.raycaster.setFromCamera(this.pointer, this.camera);
+      const [first] = this.raycaster.intersectObjects(this.blockMeshes, false);
+      hit = first ? (this.panels.find((pn) => pn.mesh === first.object) ?? null) : null;
+    }
+    const ease = 1 - Math.exp(-dt * 7);
+
+    // Manifesto: the vault opens, blocks drift apart.
     const burst = smoothstep(0.05, 0.85, mani);
     for (const panel of this.panels) {
+      const reach = hit ? panel.origin.distanceTo(hit.origin) : Infinity;
+      const target = hit ? Math.pow(Math.max(0, 1 - reach / 2.1), 1.5) : 0;
+      panel.hover += (target - panel.hover) * ease;
+
       const t = smoothstep(panel.delay, 1, burst * 1.4);
       panel.mesh.position
         .copy(panel.origin)
-        .addScaledVector(panel.normal, t * 7)
+        .addScaledVector(panel.normal, t * 7 + panel.hover * 1.35)
         .add(this.tmp.set(0, t * 2.5, 0));
-      panel.mesh.rotation.set(panel.spin.x * t, panel.spin.y * t, panel.spin.z * t);
+      panel.mesh.quaternion.copy(panel.baseQuat);
+      panel.mesh.rotateX(panel.spin.x * (t + panel.hover * 0.07));
+      panel.mesh.rotateY(panel.spin.y * (t + panel.hover * 0.07));
+      panel.mesh.rotateZ(panel.spin.z * t);
     }
+    this.updateHoverOverlay(hit);
     this.vaultCore.scale.setScalar(1 - burst * 0.35);
     this.bloomPass.strength = 0.5 + burst * 0.2;
+  }
+
+  private hideHoverOverlay() {
+    this.hoverMarkers.forEach((m) => m && (m.style.opacity = "0"));
+    this.hoverLines.forEach((l) => l && (l.style.opacity = "0"));
+  }
+
+  /** Crosshair labels on the hovered block and its two most-lifted neighbours. */
+  private updateHoverOverlay(hit: VaultPanel | null) {
+    const lifted = this.panels
+      .filter((pn) => pn.hover > 0.25)
+      .sort((a, b) => (a === hit ? -1 : b === hit ? 1 : b.hover - a.hover))
+      .slice(0, this.hoverMarkers.length);
+    const w = window.innerWidth;
+    const h = window.innerHeight;
+    const points: [number, number][] = [];
+    this.hoverMarkers.forEach((el, i) => {
+      if (!el) return;
+      const panel = lifted[i];
+      if (!panel) {
+        el.style.opacity = "0";
+        return;
+      }
+      this.tmp.copy(panel.normal).multiplyScalar(0.42);
+      const world = panel.mesh.getWorldPosition(new THREE.Vector3()).add(this.tmp).project(this.camera);
+      const x = (world.x * 0.5 + 0.5) * w;
+      const y = (-world.y * 0.5 + 0.5) * h;
+      points.push([x, y]);
+      el.style.opacity = String(Math.min(1, (panel.hover - 0.25) * 3));
+      el.style.transform = `translate3d(${x.toFixed(1)}px, ${y.toFixed(1)}px, 0)`;
+      const label = el.querySelector("[data-label]");
+      if (label) label.textContent = String(panel.label);
+    });
+    this.hoverLines.forEach((line, i) => {
+      if (!line) return;
+      const a = points[0];
+      const b = points[i + 1];
+      if (!a || !b) {
+        line.style.opacity = "0";
+        return;
+      }
+      line.setAttribute("x1", a[0].toFixed(1));
+      line.setAttribute("y1", a[1].toFixed(1));
+      line.setAttribute("x2", b[0].toFixed(1));
+      line.setAttribute("y2", b[1].toFixed(1));
+      line.style.opacity = "0.9";
+    });
   }
 
   private updateVentures(p: number, time: number) {

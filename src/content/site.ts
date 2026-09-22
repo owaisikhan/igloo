@@ -12,8 +12,13 @@ export const brand = {
 
 export const hero = {
   eyebrow: "EST. 2026 / SOFTWARE STUDIO",
-  title: ["We build the", "structure beneath", "your data."],
-  cue: "SCROLL TO EXPLORE",
+  missionLabel: "////// Mission",
+  mission:
+    "Kodexa builds the structure beneath your data — small, sharp tools that turn raw records into clear decisions.",
+  copyright: `// Copyright © ${new Date().getFullYear()}`,
+  legal: ["Kodexa, Inc.", "All Rights Reserved."],
+  cue: "Scroll down to explore.",
+  hoverHint: "Hover the blocks.",
 };
 
 export const manifesto = {
