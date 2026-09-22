@@ -13,6 +13,28 @@ export const glowMaterial = (intensity = 3) =>
 /* Terrain                                                             */
 /* ------------------------------------------------------------------ */
 
+// Extra peaks behind the vault, on the right-hand side of the hero camera view.
+const RIGHT_PEAKS = [
+  { x: -19, z: -115, height: 62, radius: 32 },
+  { x: 8, z: -150, height: 82, radius: 38 },
+  { x: -19, z: -159, height: 100, radius: 44 },
+  { x: 12, z: -208, height: 118, radius: 50 },
+  { x: -19, z: -215, height: 135, radius: 58 },
+];
+
+function peaks(x: number, z: number) {
+  let h = 0;
+  for (const p of RIGHT_PEAKS) {
+    const d2 = (x - p.x) ** 2 + (z - p.z) ** 2;
+    const falloff = Math.exp(-d2 / (p.radius * p.radius));
+    if (falloff < 0.002) continue;
+    // Ridged noise carves gullies and sharp crests into each peak.
+    const ridge = 1 - Math.abs(fbm2(x * 0.03 + p.x, z * 0.03 + p.z, 5) * 2 - 1);
+    h = Math.max(h, p.height * falloff * (0.65 + ridge * 0.55));
+  }
+  return h;
+}
+
 export function buildTerrain(segments: number) {
   const size = 700;
   const geo = new THREE.PlaneGeometry(size, size, segments, segments);
@@ -30,11 +52,28 @@ export function buildTerrain(segments: number) {
     const far = THREE.MathUtils.smoothstep(d, 50, 150);
     const mountains = Math.pow(fbm2(x * 0.011 + 3, z * 0.011 + 9, 6), 1.5) * 170 * far;
     const grain = (fbm2(x * 0.7, z * 0.7, 3) - 0.5) * 0.35;
-    pos.setY(i, drifts + mountains + grain + mound - 1.5);
+    pos.setY(i, drifts + Math.max(mountains, peaks(x, z)) + grain + mound - 1.5);
   }
   geo.computeVertexNormals();
+
+  // Snow on gentle ground, darker exposed rock on steep slopes so ridges read
+  // against the fog.
+  const normals = geo.attributes.normal as THREE.BufferAttribute;
+  const colors = new Float32Array(pos.count * 3);
+  const snow = new THREE.Color("#8a91a2");
+  const rock = new THREE.Color("#4c5263");
+  const c = new THREE.Color();
+  for (let i = 0; i < pos.count; i++) {
+    const steep = THREE.MathUtils.smoothstep(1 - normals.getY(i), 0.12, 0.45);
+    const streak = fbm2(pos.getX(i) * 0.09, pos.getZ(i) * 0.09, 3);
+    c.lerpColors(snow, rock, Math.min(1, steep * (0.6 + streak * 0.8)));
+    colors.set([c.r, c.g, c.b], i * 3);
+  }
+  geo.setAttribute("color", new THREE.BufferAttribute(colors, 3));
+
   const mat = new THREE.MeshStandardMaterial({
-    color: "#747b8c",
+    vertexColors: true,
+    color: "#ffffff",
     roughness: 0.95,
     metalness: 0,
   });
