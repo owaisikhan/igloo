@@ -58,7 +58,7 @@ const GlitchShader = {
       uv.x += step(0.72, n) * (n - 0.72) * uGlitch * 0.35;
       float blocky = step(0.9, hash(floor(uv * vec2(18.0, 40.0)) + floor(uTime * 12.0)));
       uv = mix(uv, floor(uv * 90.0) / 90.0, blocky * uGlitch);
-      float off = 0.002 + uGlitch * 0.018;
+      float off = 0.0004 + uGlitch * 0.018;
       vec3 col = vec3(
         texture2D(tDiffuse, uv + vec2(off, 0.0)).r,
         texture2D(tDiffuse, uv).g,

@@ -71,13 +71,7 @@ export function buildTerrain(segments: number) {
   }
   geo.setAttribute("color", new THREE.BufferAttribute(colors, 3));
 
-  const mat = new THREE.MeshStandardMaterial({
-    vertexColors: true,
-    color: "#ffffff",
-    roughness: 0.95,
-    metalness: 0,
-  });
-  const mesh = new THREE.Mesh(geo, mat);
+  const mesh = new THREE.Mesh(geo, terrainMaterial());
   mesh.receiveShadow = true;
   return mesh;
 }
@@ -98,19 +92,32 @@ export type VaultPanel = {
   label: number;
 };
 
-/** Unit rounded block with lumpy, hand-cut faces so it reads as packed snow. */
-function buildBlockGeometry(seed: number) {
-  let geo: THREE.BufferGeometry = new RoundedBoxGeometry(1, 1, 1, 7, 0.14);
+/**
+ * Pillowy snow block built at its real size, so the large soft bevel stays
+ * round instead of being stretched by a non-uniform scale.
+ */
+function buildBlockGeometry(size: THREE.Vector3, seed: number) {
+  const bevel = Math.min(size.x, size.y, size.z) * 0.24;
+  let geo: THREE.BufferGeometry = new RoundedBoxGeometry(size.x, size.y, size.z, 8, bevel);
   geo.deleteAttribute("normal");
   geo.deleteAttribute("uv");
   geo = mergeVertices(geo);
   const pos = geo.attributes.position as THREE.BufferAttribute;
   const v = new THREE.Vector3();
+  const half = size.clone().multiplyScalar(0.5);
   for (let i = 0; i < pos.count; i++) {
     v.fromBufferAttribute(pos, i);
-    const lumps = fbm3(v.x * 3.1 + seed, v.y * 3.1, v.z * 3.1 - seed, 4) - 0.5;
-    const chips = fbm3(v.x * 7.5 - seed, v.y * 7.5 + seed, v.z * 7.5, 3) - 0.5;
-    v.multiplyScalar(1 + lumps * 0.08 + chips * 0.035);
+    // Faces bulge slightly outward, like packed snow that has settled.
+    const nx = v.x / half.x;
+    const ny = v.y / half.y;
+    const nz = v.z / half.z;
+    const puff = 0.03 * Math.min(size.x, size.y, size.z);
+    v.x += Math.sign(nx) * puff * (1 - ny * ny) * (1 - nz * nz) * Math.abs(nx);
+    v.y += Math.sign(ny) * puff * (1 - nx * nx) * (1 - nz * nz) * Math.abs(ny);
+    v.z += Math.sign(nz) * puff * (1 - nx * nx) * (1 - ny * ny) * Math.abs(nz);
+    const lumps = fbm3(v.x * 2.4 + seed, v.y * 2.4, v.z * 2.4 - seed, 4) - 0.5;
+    const chips = fbm3(v.x * 6 - seed, v.y * 6 + seed, v.z * 6, 3) - 0.5;
+    v.addScaledVector(v.clone().normalize(), lumps * 0.07 + chips * 0.025);
     pos.setXYZ(i, v.x, v.y, v.z);
   }
   geo.computeVertexNormals();
@@ -155,34 +162,38 @@ const snowNoiseGlsl = /* glsl */ `
   }
 `;
 
-/** Snow-block material: procedural bump, albedo and roughness variation, ice glints and a frosty rim. */
-function snowMaterial() {
-  const mat = new THREE.MeshStandardMaterial({
-    color: "#737a8d",
-    roughness: 0.92,
-    metalness: 0,
-  });
+type SnowDetail = {
+  /** "object": pattern sticks to each mesh; "world": fixed in the world (terrain). */
+  space: "object" | "world";
+  scale: number;
+  bump: number;
+  /** How strongly upward-facing surfaces turn bright, frosted white. */
+  frost: number;
+  rim: number;
+  glints: boolean;
+};
+
+/** Injects the procedural packed-snow surface into a standard material. */
+function addSnowDetail(mat: THREE.MeshStandardMaterial, o: SnowDetail) {
   mat.onBeforeCompile = (shader) => {
+    const pos =
+      o.space === "object"
+        ? "vKxPos = transformed;"
+        : "vKxPos = (modelMatrix * vec4(transformed, 1.0)).xyz;";
     shader.vertexShader = shader.vertexShader
       .replace("#include <common>", "#include <common>\nvarying vec3 vKxPos;")
-      .replace(
-        "#include <begin_vertex>",
-        `#include <begin_vertex>
-        // Object space scaled by the block's own size: the pattern sticks to the
-        // block while it moves, and density stays even across block sizes.
-        vKxPos = transformed * vec3(
-          length(modelMatrix[0].xyz),
-          length(modelMatrix[1].xyz),
-          length(modelMatrix[2].xyz));`,
-      );
+      .replace("#include <begin_vertex>", `#include <begin_vertex>\n${pos}`);
     shader.fragmentShader = shader.fragmentShader
       .replace("#include <common>", "#include <common>\n" + snowNoiseGlsl)
       .replace(
         "#include <color_fragment>",
         `#include <color_fragment>
-        float kxH = kxSnowHeight(vKxPos);
-        float kxPatch = kxFbm(vKxPos * 0.9 + 7.0);
-        diffuseColor.rgb *= 0.84 + kxH * 0.22 + kxPatch * 0.12;`,
+        vec3 kxP = vKxPos * ${o.scale.toFixed(3)};
+        float kxH = kxSnowHeight(kxP);
+        float kxPatch = kxFbm(kxP * 0.45 + 7.0);
+        // Detail fades with distance to avoid shimmering on far surfaces.
+        float kxNear = 1.0 - smoothstep(18.0, 70.0, length(vViewPosition));
+        diffuseColor.rgb *= mix(1.0, 0.8 + kxH * 0.28 + kxPatch * 0.16, kxNear);`,
       )
       .replace(
         "#include <roughnessmap_fragment>",
@@ -200,30 +211,61 @@ function snowMaterial() {
           vec3 kxR1 = cross(kxSy, normal);
           vec3 kxR2 = cross(normal, kxSx);
           float kxDet = dot(kxSx, kxR1) * faceDirection;
-          vec2 kxDh = vec2(dFdx(kxH), dFdy(kxH)) * 0.16;
+          vec2 kxDh = vec2(dFdx(kxH), dFdy(kxH)) * ${o.bump.toFixed(3)} * kxNear;
           vec3 kxGrad = sign(kxDet) * (kxDh.x * kxR1 + kxDh.y * kxR2);
           normal = normalize(abs(kxDet) * normal - kxGrad);
-        }`,
+        }
+        // Fresh snow settles on upward-facing surfaces.
+        vec3 kxWorldN = inverseTransformDirection(normal, viewMatrix);
+        float kxFrost = smoothstep(0.25, 0.9, kxWorldN.y) * (0.75 + kxPatch * 0.5);
+        diffuseColor.rgb = mix(diffuseColor.rgb, vec3(0.9, 0.93, 1.0), clamp(kxFrost, 0.0, 1.0) * ${o.frost.toFixed(3)});`,
       )
       .replace(
         "#include <dithering_fragment>",
         `#include <dithering_fragment>
-        float kxRim = pow(1.0 - clamp(dot(normalize(vViewPosition), normal), 0.0, 1.0), 2.5);
-        gl_FragColor.rgb += kxRim * vec3(0.26, 0.29, 0.35);
-        // Sparse ice crystals that catch the light.
-        float kxGlint = step(0.995, kxHash(floor(vKxPos * 60.0)));
-        float kxFacing = pow(clamp(dot(normalize(vViewPosition), normal), 0.0, 1.0), 4.0);
-        gl_FragColor.rgb += kxGlint * kxFacing * 0.3;`,
+        float kxFacing = clamp(dot(normalize(vViewPosition), normal), 0.0, 1.0);
+        gl_FragColor.rgb += pow(1.0 - kxFacing, 2.5) * vec3(0.3, 0.33, 0.4) * ${o.rim.toFixed(3)};
+        ${
+          o.glints
+            ? `float kxGlint = step(0.995, kxHash(floor(vKxPos * 60.0)));
+        gl_FragColor.rgb += kxGlint * pow(kxFacing, 4.0) * 0.3;`
+            : ""
+        }`,
       );
   };
   return mat;
+}
+
+/** Snow-block material: soft packed snow with frosted tops. */
+function snowMaterial() {
+  return addSnowDetail(
+    new THREE.MeshStandardMaterial({ color: "#6d7487", roughness: 0.9, metalness: 0 }),
+    { space: "object", scale: 1, bump: 0.2, frost: 0.45, rim: 0.8, glints: true },
+  );
+}
+
+/** Ground snow: wind-packed grain, fixed in world space. */
+export function terrainMaterial() {
+  return addSnowDetail(
+    new THREE.MeshStandardMaterial({ vertexColors: true, color: "#ffffff", roughness: 0.95, metalness: 0 }),
+    { space: "world", scale: 0.35, bump: 0.12, frost: 0, rim: 0.15, glints: false },
+  );
 }
 
 export function buildVault(radius = 4.2) {
   const group = new THREE.Group();
   const rand = createRandom(7);
   const panels: VaultPanel[] = [];
-  const geometries = [0, 1, 2].map((s) => buildBlockGeometry(s * 9.3 + 1));
+  const geometryCache = new Map<string, THREE.BufferGeometry>();
+  const geometryFor = (size: THREE.Vector3, variant: number) => {
+    const key = `${size.x.toFixed(2)}:${size.y.toFixed(2)}:${size.z.toFixed(2)}:${variant}`;
+    let geo = geometryCache.get(key);
+    if (!geo) {
+      geo = buildBlockGeometry(size, variant * 9.3 + 1);
+      geometryCache.set(key, geo);
+    }
+    return geo;
+  };
   const material = snowMaterial();
   const edgeGeo = new THREE.EdgesGeometry(new THREE.BoxGeometry(1, 1, 1));
   const edgePositions: number[] = [];
@@ -237,7 +279,7 @@ export function buildVault(radius = 4.2) {
     size: THREE.Vector3,
   ) => {
     const [tangent, up, normal] = basis;
-    const mesh = new THREE.Mesh(geometries[panels.length % geometries.length], material);
+    const mesh = new THREE.Mesh(geometryFor(size, panels.length % 3), material);
     const rot = new THREE.Matrix4().makeBasis(tangent, up, normal);
     const quat = new THREE.Quaternion().setFromRotationMatrix(rot);
     // A little hand-laid irregularity.
@@ -248,7 +290,6 @@ export function buildVault(radius = 4.2) {
     );
     mesh.quaternion.copy(quat);
     mesh.position.copy(center);
-    mesh.scale.copy(size);
     mesh.castShadow = true;
     mesh.receiveShadow = true;
     group.add(mesh);
@@ -283,7 +324,7 @@ export function buildVault(radius = 4.2) {
     const ringRadius = (radius - thickness / 2) * Math.cos(phi);
     const y = (radius - thickness / 2) * Math.sin(phi);
     const count = Math.max(5, Math.round((Math.PI * 2 * ringRadius) / 1.55));
-    const width = ((Math.PI * 2 * ringRadius) / count) * 0.93;
+    const width = ((Math.PI * 2 * ringRadius) / count) * 0.88;
     const stagger = r % 2 ? Math.PI / count : 0;
     for (let k = 0; k < count; k++) {
       const theta = (k / count) * Math.PI * 2 + stagger;
@@ -297,7 +338,7 @@ export function buildVault(radius = 4.2) {
       const tangent = new THREE.Vector3(-Math.sin(theta), 0, Math.cos(theta));
       const up = new THREE.Vector3().crossVectors(normal, tangent).normalize();
       const center = new THREE.Vector3(ringRadius * Math.cos(theta), y, ringRadius * Math.sin(theta));
-      addBlock(center, [tangent, up, normal], new THREE.Vector3(width, rowHeight * 0.92, thickness));
+      addBlock(center, [tangent, up, normal], new THREE.Vector3(width, rowHeight * 0.86, thickness));
     }
   }
 
@@ -315,7 +356,7 @@ export function buildVault(radius = 4.2) {
   const archRadius = 1.35;
   const archBlocks = 5;
   for (let layer = 0; layer < 2; layer++) {
-    const along = radius - 0.3 + layer * 1.05;
+    const along = radius - 0.3 + layer * 1.08;
     for (let j = 0; j < archBlocks; j++) {
       const a = ((j + 0.5) / archBlocks) * Math.PI;
       const normal = side.clone().multiplyScalar(Math.cos(a)).add(new THREE.Vector3(0, Math.sin(a), 0));
@@ -329,14 +370,14 @@ export function buildVault(radius = 4.2) {
         .multiplyScalar(along)
         .addScaledVector(normal, archRadius)
         .add(new THREE.Vector3(0, 0.1, 0));
-      const arcLen = ((Math.PI * archRadius) / archBlocks) * 0.93;
-      addBlock(center, [tangent, axis.clone(), normal], new THREE.Vector3(arcLen, 0.98, 0.62));
+      const arcLen = ((Math.PI * archRadius) / archBlocks) * 0.86;
+      addBlock(center, [tangent, axis.clone(), normal], new THREE.Vector3(arcLen, 0.94, 0.7));
     }
   }
 
   // Bright interior glimpsed through the joints — picked up by the bloom pass.
   const coreMat = new THREE.MeshBasicMaterial({
-    color: new THREE.Color(1, 1, 1).multiplyScalar(2.2),
+    color: new THREE.Color(0.9, 0.95, 1).multiplyScalar(2.4),
     side: THREE.DoubleSide,
   });
   const core = new THREE.Mesh(
@@ -344,6 +385,14 @@ export function buildVault(radius = 4.2) {
     coreMat,
   );
   group.add(core);
+  // Light spilling out of the interior: lights block sides and the joints.
+  const innerLight = new THREE.PointLight("#dfe9ff", 22, radius * 2.2, 1.6);
+  innerLight.position.set(0, radius * 0.35, 0);
+  group.add(innerLight);
+  const tunnelLight = new THREE.PointLight("#dfe9ff", 6, 4, 1.6);
+  tunnelLight.position.copy(axis.clone().multiplyScalar(radius + 0.7)).setY(0.9);
+  group.add(tunnelLight);
+
   const baseRing = new THREE.Mesh(new THREE.TorusGeometry(radius + 0.1, 0.03, 6, 128), glowMaterial(1.4));
   baseRing.rotation.x = Math.PI / 2;
   baseRing.position.y = -0.1;
