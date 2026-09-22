@@ -24,11 +24,11 @@ export function buildTerrain(segments: number) {
     const d = Math.hypot(x, z);
     // Flat plateau for the vault, rolling drifts, then mountains far away.
     // Gentle mound for the vault, rolling drifts, then mountains behind.
-    const plateau = THREE.MathUtils.smoothstep(d, 6, 22);
+    const plateau = THREE.MathUtils.smoothstep(d, 12, 45);
     const mound = (1 - THREE.MathUtils.smoothstep(d, 4, 30)) * 1.5;
     const drifts = (fbm2(x * 0.04 + 11, z * 0.04 - 4) - 0.45) * 10 * plateau;
-    const far = THREE.MathUtils.smoothstep(d, 45, 160);
-    const mountains = Math.pow(fbm2(x * 0.011 + 3, z * 0.011 + 9, 6), 1.5) * 120 * far;
+    const far = THREE.MathUtils.smoothstep(d, 50, 150);
+    const mountains = Math.pow(fbm2(x * 0.011 + 3, z * 0.011 + 9, 6), 1.5) * 170 * far;
     const grain = (fbm2(x * 0.7, z * 0.7, 3) - 0.5) * 0.35;
     pos.setY(i, drifts + mountains + grain + mound - 1.5);
   }

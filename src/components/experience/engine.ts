@@ -324,7 +324,7 @@ export class KodexaEngine {
     const mani = range(p, MANIFESTO.start, MANIFESTO.end);
 
     // Intro: dense fog hides everything except the wireframe overlay.
-    const introFog = THREE.MathUtils.lerp(0.09, 0.0045, intro);
+    const introFog = THREE.MathUtils.lerp(0.09, 0.003, intro);
     const whiteout = smoothstep(0.85, 1, mani) * 0.12;
     this.fog.density = introFog + whiteout;
 
@@ -338,11 +338,11 @@ export class KodexaEngine {
     // Camera: top-down → orbiting hero shot → push into the vault.
     const orbit = 0.62 - hero * 0.45 + Math.sin(time * 0.1) * 0.03;
     const dist = THREE.MathUtils.lerp(20, 18, hero) - smoothstep(0, 1, mani) * 11;
-    const height = THREE.MathUtils.lerp(6.5, 5.2, hero) - mani * 2.2;
+    const height = THREE.MathUtils.lerp(3.6, 3.0, hero) - mani * 0.8;
     const introPos = this.tmp.set(0, 42, 24);
     const heroPos = new THREE.Vector3(Math.sin(orbit) * dist, height, Math.cos(orbit) * dist);
     this.camera.position.copy(introPos.lerp(heroPos, intro));
-    this.lookAt.set(0, THREE.MathUtils.lerp(0, 2.4, intro) + mani * 1.2, 0);
+    this.lookAt.set(0, THREE.MathUtils.lerp(0, 3.6, intro) + mani * 0.2, 0);
 
     // Hover: blocks near the pointer slide outward along their normals.
     const interactive = intro > 0.9 && mani < 0.05;
