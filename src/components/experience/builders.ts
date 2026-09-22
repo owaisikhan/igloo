@@ -98,9 +98,9 @@ export type VaultPanel = {
   label: number;
 };
 
-/** Unit rounded block roughened with position-based noise so it reads as packed snow. */
+/** Unit rounded block with lumpy, hand-cut faces so it reads as packed snow. */
 function buildBlockGeometry(seed: number) {
-  let geo: THREE.BufferGeometry = new RoundedBoxGeometry(1, 1, 1, 4, 0.14);
+  let geo: THREE.BufferGeometry = new RoundedBoxGeometry(1, 1, 1, 7, 0.14);
   geo.deleteAttribute("normal");
   geo.deleteAttribute("uv");
   geo = mergeVertices(geo);
@@ -108,28 +108,113 @@ function buildBlockGeometry(seed: number) {
   const v = new THREE.Vector3();
   for (let i = 0; i < pos.count; i++) {
     v.fromBufferAttribute(pos, i);
-    const n = fbm3(v.x * 3.1 + seed, v.y * 3.1, v.z * 3.1 - seed, 4) - 0.5;
-    v.multiplyScalar(1 + n * 0.07);
+    const lumps = fbm3(v.x * 3.1 + seed, v.y * 3.1, v.z * 3.1 - seed, 4) - 0.5;
+    const chips = fbm3(v.x * 7.5 - seed, v.y * 7.5 + seed, v.z * 7.5, 3) - 0.5;
+    v.multiplyScalar(1 + lumps * 0.08 + chips * 0.035);
     pos.setXYZ(i, v.x, v.y, v.z);
   }
   geo.computeVertexNormals();
   return geo;
 }
 
-/** Standard material plus a fresnel rim so block edges catch a frosty highlight. */
+// GLSL helpers for the procedural snow surface (value noise + fbm).
+const snowNoiseGlsl = /* glsl */ `
+  varying vec3 vKxPos;
+  float kxHash(vec3 p) {
+    p = fract(p * 0.3183099 + 0.1);
+    p *= 17.0;
+    return fract(p.x * p.y * p.z * (p.x + p.y + p.z));
+  }
+  float kxNoise(vec3 x) {
+    vec3 i = floor(x);
+    vec3 f = fract(x);
+    f = f * f * (3.0 - 2.0 * f);
+    return mix(
+      mix(mix(kxHash(i), kxHash(i + vec3(1, 0, 0)), f.x),
+          mix(kxHash(i + vec3(0, 1, 0)), kxHash(i + vec3(1, 1, 0)), f.x), f.y),
+      mix(mix(kxHash(i + vec3(0, 0, 1)), kxHash(i + vec3(1, 0, 1)), f.x),
+          mix(kxHash(i + vec3(0, 1, 1)), kxHash(i + vec3(1, 1, 1)), f.x), f.y),
+      f.z);
+  }
+  float kxFbm(vec3 p) {
+    float s = 0.0;
+    float a = 0.5;
+    for (int i = 0; i < 5; i++) {
+      s += a * kxNoise(p);
+      p *= 2.07;
+      a *= 0.5;
+    }
+    return s;
+  }
+  // Packed-snow height field: broad lumps, fine grain and scattered pits.
+  float kxSnowHeight(vec3 p) {
+    float lumps = kxFbm(p * 2.2);
+    float grain = kxFbm(p * 6.0);
+    float pits = smoothstep(0.66, 0.82, kxNoise(p * 4.5));
+    return lumps * 0.6 + grain * 0.4 - pits * 0.3;
+  }
+`;
+
+/** Snow-block material: procedural bump, albedo and roughness variation, ice glints and a frosty rim. */
 function snowMaterial() {
   const mat = new THREE.MeshStandardMaterial({
-    color: "#6f7688",
-    roughness: 0.95,
+    color: "#737a8d",
+    roughness: 0.92,
     metalness: 0,
   });
   mat.onBeforeCompile = (shader) => {
-    shader.fragmentShader = shader.fragmentShader.replace(
-      "#include <dithering_fragment>",
-      `#include <dithering_fragment>
-      float kxRim = pow(1.0 - clamp(dot(normalize(vViewPosition), normal), 0.0, 1.0), 2.5);
-      gl_FragColor.rgb += kxRim * vec3(0.28, 0.31, 0.37);`,
-    );
+    shader.vertexShader = shader.vertexShader
+      .replace("#include <common>", "#include <common>\nvarying vec3 vKxPos;")
+      .replace(
+        "#include <begin_vertex>",
+        `#include <begin_vertex>
+        // Object space scaled by the block's own size: the pattern sticks to the
+        // block while it moves, and density stays even across block sizes.
+        vKxPos = transformed * vec3(
+          length(modelMatrix[0].xyz),
+          length(modelMatrix[1].xyz),
+          length(modelMatrix[2].xyz));`,
+      );
+    shader.fragmentShader = shader.fragmentShader
+      .replace("#include <common>", "#include <common>\n" + snowNoiseGlsl)
+      .replace(
+        "#include <color_fragment>",
+        `#include <color_fragment>
+        float kxH = kxSnowHeight(vKxPos);
+        float kxPatch = kxFbm(vKxPos * 0.9 + 7.0);
+        diffuseColor.rgb *= 0.84 + kxH * 0.22 + kxPatch * 0.12;`,
+      )
+      .replace(
+        "#include <roughnessmap_fragment>",
+        `#include <roughnessmap_fragment>
+        roughnessFactor = clamp(roughnessFactor * (0.8 + kxH * 0.35), 0.35, 1.0);`,
+      )
+      .replace(
+        "#include <normal_fragment_maps>",
+        `#include <normal_fragment_maps>
+        {
+          // Screen-space bump mapping from the height field.
+          vec3 kxSurf = -vViewPosition;
+          vec3 kxSx = dFdx(kxSurf);
+          vec3 kxSy = dFdy(kxSurf);
+          vec3 kxR1 = cross(kxSy, normal);
+          vec3 kxR2 = cross(normal, kxSx);
+          float kxDet = dot(kxSx, kxR1) * faceDirection;
+          vec2 kxDh = vec2(dFdx(kxH), dFdy(kxH)) * 0.16;
+          vec3 kxGrad = sign(kxDet) * (kxDh.x * kxR1 + kxDh.y * kxR2);
+          normal = normalize(abs(kxDet) * normal - kxGrad);
+        }`,
+      )
+      .replace(
+        "#include <dithering_fragment>",
+        `#include <dithering_fragment>
+        float kxRim = pow(1.0 - clamp(dot(normalize(vViewPosition), normal), 0.0, 1.0), 2.5);
+        gl_FragColor.rgb += kxRim * vec3(0.26, 0.29, 0.35);
+        // Sparse ice crystals that catch the light.
+        float kxGlint = step(0.995, kxHash(floor(vKxPos * 60.0)));
+        float kxFacing = pow(clamp(dot(normalize(vViewPosition), normal), 0.0, 1.0), 4.0);
+        gl_FragColor.rgb += kxGlint * kxFacing * 0.3;`,
+      );
   };
   return mat;
 }
