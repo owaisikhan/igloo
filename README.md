@@ -29,17 +29,3 @@ npm run lint
 npm run typecheck
 npm run check      # lint + typecheck + build
 ```
-
-## /tea: Kinari tea demo
-
-A second, separate page at `/tea`: a scroll-driven glass teapot. Leaves fall in
-from a foil pouch, the water swirls and turns gold, and the pot pours into a
-cup. Copy is in `src/content/tea.ts`; the WhatsApp number there is a placeholder.
-
-`media/kinari-reel.mp4` is a 1080x1920 video of the page for Facebook or
-Instagram. To re-record it after changes:
-
-```bash
-npm run build && npx next start -p 3100
-node scripts/record-tea-reel.mjs   # needs Playwright and ffmpeg
-```
